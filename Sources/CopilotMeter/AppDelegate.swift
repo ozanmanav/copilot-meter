@@ -3,21 +3,19 @@ import Foundation
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private static let defaultAllowance = 1_500.0
-    private static let allowanceKey = "monthlyAllowance"
     private static let refreshInterval: TimeInterval = 5 * 60
 
-    private let github = GitHubCLI()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var refreshTimer: Timer?
-    private var snapshot: UsageSnapshot?
+    private var quota: PlanQuota?
+    private var updatedAt: Date?
     private var lastError: String?
     private var isRefreshing = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        statusItem.button?.title = "…%"
+        statusItem.button?.title = "—"
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         statusItem.button?.toolTip = "Loading Copilot usage…"
 
@@ -51,26 +49,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isRefreshing = true
         statusItem.button?.toolTip = "Refreshing Copilot usage…"
 
-        let allowance = monthlyAllowance
-        let github = github
-
         Task.detached(priority: .utility) { [weak self] in
-            let result = Result { try github.fetchSnapshot(allowance: allowance) }
+            let result = Result { try CopilotCLI().fetchQuota() }
             await self?.finishRefresh(result)
         }
     }
 
-    private func finishRefresh(_ result: Result<UsageSnapshot, Error>) {
+    private func finishRefresh(_ result: Result<PlanQuota, Error>) {
         isRefreshing = false
 
         switch result {
-        case .success(let snapshot):
-            self.snapshot = snapshot
+        case .success(let quota):
+            self.quota = quota
+            updatedAt = Date()
             lastError = nil
-            statusItem.button?.title = "\(snapshot.percentage)%"
-            statusItem.button?.toolTip = formatDetail(snapshot)
+            statusItem.button?.title = quota.title
+            statusItem.button?.toolTip = describe(quota)
         case .failure(let error):
             lastError = error.localizedDescription
+            statusItem.button?.title = "—"
             statusItem.button?.toolTip = lastError
         }
 
@@ -84,9 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.removeAllItems()
 
-        if let snapshot {
-            menu.addItem(disabledItem(formatDetail(snapshot)))
-            menu.addItem(disabledItem("Updated \(relativeDate(snapshot.fetchedAt))"))
+        if let quota, let updatedAt {
+            let prefix = lastError == nil ? "" : "Last known: "
+            menu.addItem(disabledItem(prefix + describe(quota)))
+            menu.addItem(disabledItem("Updated \(relativeDate(updatedAt))"))
         } else {
             menu.addItem(disabledItem(isRefreshing ? "Refreshing…" : "Usage not available"))
         }
@@ -97,39 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(menuItem("Refresh Now", action: #selector(refresh)))
-        menu.addItem(menuItem("Set Monthly Allowance…", action: #selector(editAllowance)))
         menu.addItem(menuItem("Open Usage on GitHub", action: #selector(openGitHubUsage)))
         menu.addItem(.separator())
         menu.addItem(menuItem("Quit Copilot Meter", action: #selector(quit)))
-    }
-
-    @objc
-    private func editAllowance() {
-        let alert = NSAlert()
-        alert.messageText = "Monthly AI credit allowance"
-        alert.informativeText = "Use the total AI credits included with your current GitHub Copilot plan."
-        alert.alertStyle = .informational
-
-        let input = NSTextField(string: formatNumber(monthlyAllowance))
-        input.frame = NSRect(x: 0, y: 0, width: 180, height: 24)
-        input.placeholderString = "1500"
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
-
-        guard let allowance = Double(input.stringValue), allowance > 0, allowance.isFinite else {
-            let errorAlert = NSAlert()
-            errorAlert.messageText = "Enter a number greater than zero."
-            errorAlert.runModal()
-            return
-        }
-
-        UserDefaults.standard.set(allowance, forKey: Self.allowanceKey)
-        refresh()
     }
 
     @objc
@@ -146,11 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    private var monthlyAllowance: Double {
-        let stored = UserDefaults.standard.double(forKey: Self.allowanceKey)
-        return stored > 0 ? stored : Self.defaultAllowance
-    }
-
     private func menuItem(_ title: String, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
@@ -163,12 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func formatDetail(_ snapshot: UsageSnapshot) -> String {
-        "\(formatNumber(snapshot.usedCredits)) / \(formatNumber(snapshot.allowance)) credits · @\(snapshot.account)"
-    }
-
-    private func formatNumber(_ number: Double) -> String {
-        number.formatted(.number.precision(.fractionLength(0...1)))
+    private func describe(_ quota: PlanQuota) -> String {
+        quota.isUnlimitedEntitlement ? "Copilot plan has no metered quota" : "Copilot plan: \(quota.title) used"
     }
 
     private func relativeDate(_ date: Date) -> String {

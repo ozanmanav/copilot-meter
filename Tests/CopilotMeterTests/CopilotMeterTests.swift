@@ -4,30 +4,57 @@ import Testing
 
 struct CopilotMeterTests {
     @Test
-    func roundsPercentage() {
-        #expect(UsageMath.percentage(used: 375, allowance: 1_500) == 25)
-        #expect(UsageMath.percentage(used: 1_001, allowance: 1_500) == 67)
+    func showsUsedPlanQuotaInsteadOfRemainingOrChatQuota() throws {
+        let response = frame(#"""
+        {"id":1,"result":{"quotaSnapshots":{
+          "chat":{"remainingPercentage":100,"isUnlimitedEntitlement":true},
+          "premium_interactions":{"remainingPercentage":19.9,"isUnlimitedEntitlement":false}
+        }}}
+        """#)
+
+        #expect(try QuotaReply.decodeFrame(response)?.title == "80%")
+        #expect(try QuotaReply.decodeFrame(response.dropLast()) == nil)
     }
 
     @Test
-    func capsPercentage() {
-        #expect(UsageMath.percentage(used: 20_000, allowance: 1_500) == 999)
-        #expect(UsageMath.percentage(used: -10, allowance: 1_500) == 0)
-        #expect(UsageMath.percentage(used: 10, allowance: 0) == 0)
+    func doesNotDisplayZeroForAnUnlimitedPlan() throws {
+        let response = frame(#"""
+        {"id":1,"result":{"quotaSnapshots":{
+          "premium_interactions":{"remainingPercentage":100,"isUnlimitedEntitlement":true}
+        }}}
+        """#)
+
+        let decoded = try QuotaReply.decodeFrame(response)
+        let quota = try #require(decoded)
+        #expect(quota.usedPercentage == nil)
     }
 
     @Test
-    func sumsUsageItems() throws {
-        let json = #"""
-        {
-          "usageItems": [
-            { "grossQuantity": 18.5 },
-            { "grossQuantity": 21 }
-          ]
+    func reportsAnUnsupportedRPCInsteadOfDisplayingZero() {
+        let response = frame(#"{"id":1,"error":{"code":-32601,"message":"Method not found"}}"#)
+        #expect(throws: QuotaError.unsupportedCLI) {
+            try QuotaReply.decodeFrame(response)
         }
-        """#
+    }
 
-        let report = try JSONDecoder().decode(UsageReport.self, from: Data(json.utf8))
-        #expect(report.usedCredits == 39.5)
+    @Test
+    func rejectsMissingAndInvalidQuotas() {
+        let noPlan = frame(#"{"id":1,"result":{"quotaSnapshots":{}}}"#)
+        let invalid = frame(#"""
+        {"id":1,"result":{"quotaSnapshots":{
+          "premium_interactions":{"remainingPercentage":101,"isUnlimitedEntitlement":false}
+        }}}
+        """#)
+
+        #expect(throws: QuotaError.unavailable) {
+            try QuotaReply.decodeFrame(noPlan)
+        }
+        #expect(throws: QuotaError.invalidResponse) {
+            try QuotaReply.decodeFrame(invalid)
+        }
+    }
+
+    private func frame(_ body: String) -> Data {
+        Data("Content-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8)
     }
 }

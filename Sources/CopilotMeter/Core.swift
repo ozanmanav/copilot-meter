@@ -1,162 +1,187 @@
+import Darwin
 import Foundation
 
-struct UsageSnapshot: Equatable, Sendable {
-    let usedCredits: Double
-    let allowance: Double
-    let account: String
-    let fetchedAt: Date
+struct PlanQuota: Decodable, Sendable {
+    let remainingPercentage: Double
+    let isUnlimitedEntitlement: Bool
 
-    var percentage: Int {
-        UsageMath.percentage(used: usedCredits, allowance: allowance)
-    }
-}
-
-enum UsageMath {
-    static func percentage(used: Double, allowance: Double) -> Int {
-        guard allowance > 0, used.isFinite, allowance.isFinite else {
-            return 0
-        }
-
-        return min(999, max(0, Int(((used / allowance) * 100).rounded())))
-    }
-}
-
-struct UsageReport: Decodable {
-    let usageItems: [UsageItem]
-
-    var usedCredits: Double {
-        usageItems.reduce(0) { $0 + $1.grossQuantity }
-    }
-}
-
-struct UsageItem: Decodable {
-    let grossQuantity: Double
-}
-
-enum GitHubUsageError: LocalizedError {
-    case missingGitHubCLI
-    case commandFailed(String)
-    case invalidResponse
-
-    var errorDescription: String? {
-        switch self {
-        case .missingGitHubCLI:
-            return "GitHub CLI (gh) was not found. Install it with brew install gh."
-        case .commandFailed(let message):
-            return message
-        case .invalidResponse:
-            return "GitHub returned a response that Copilot Meter could not read."
-        }
-    }
-}
-
-struct GitHubCLI: Sendable {
-    private let executableURL: URL?
-
-    init(fileManager: FileManager = .default) {
-        let candidates = [
-            "/opt/homebrew/bin/gh",
-            "/usr/local/bin/gh",
-            "/usr/bin/gh"
-        ]
-
-        executableURL = candidates
-            .first(where: fileManager.isExecutableFile(atPath:))
-            .map(URL.init(fileURLWithPath:))
-    }
-
-    func fetchSnapshot(allowance: Double) throws -> UsageSnapshot {
-        guard let executableURL else {
-            throw GitHubUsageError.missingGitHubCLI
-        }
-
-        let account = try run(
-            executableURL: executableURL,
-            arguments: ["api", "--hostname", "github.com", "/user", "--jq", ".login"]
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !account.isEmpty else {
-            throw GitHubUsageError.invalidResponse
-        }
-
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
-        let now = Date()
-        let components = calendar.dateComponents([.year, .month], from: now)
-
-        guard let year = components.year, let month = components.month else {
-            throw GitHubUsageError.invalidResponse
-        }
-
-        let endpoint = "/users/\(account)/settings/billing/ai_credit/usage?year=\(year)&month=\(month)"
-        let output = try run(
-            executableURL: executableURL,
-            arguments: [
-                "api",
-                "--hostname",
-                "github.com",
-                "-H",
-                "X-GitHub-Api-Version: 2026-03-10",
-                endpoint
-            ]
-        )
-
-        let report: UsageReport
-        do {
-            report = try JSONDecoder().decode(UsageReport.self, from: Data(output.utf8))
-        } catch {
-            throw GitHubUsageError.invalidResponse
-        }
-
-        return UsageSnapshot(
-            usedCredits: report.usedCredits,
-            allowance: allowance,
-            account: account,
-            fetchedAt: now
-        )
-    }
-
-    private func run(executableURL: URL, arguments: [String]) throws -> String {
-        let process = Process()
-        let output = Pipe()
-        let errors = Pipe()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = errors
-
-        do {
-            try process.run()
-        } catch {
-            throw GitHubUsageError.commandFailed(error.localizedDescription)
-        }
-
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let message = String(
-                data: errors.fileHandleForReading.readDataToEndOfFile(),
-                encoding: .utf8
-            )?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let fallback = "GitHub could not load Copilot usage."
-            throw GitHubUsageError.commandFailed(
-                authorizationHint(for: message ?? "") ?? (message?.isEmpty == false ? message! : fallback)
-            )
-        }
-
-        return String(
-            data: output.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-    }
-
-    private func authorizationHint(for message: String) -> String? {
-        guard message.localizedCaseInsensitiveContains("user scope") else {
+    var usedPercentage: Int? {
+        guard !isUnlimitedEntitlement, (0...100).contains(remainingPercentage) else {
             return nil
         }
 
-        return "GitHub billing access is not authorized. Run: gh auth refresh -h github.com -s user"
+        return Int((100 - remainingPercentage).rounded())
+    }
+
+    var title: String {
+        usedPercentage.map { "\($0)%" } ?? "—"
+    }
+}
+
+enum QuotaError: LocalizedError {
+    case missingCLI
+    case timedOut
+    case invalidResponse
+    case unavailable
+    case unsupportedCLI
+    case requestFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .missingCLI:
+            return "Copilot CLI not found. Install it and run make install again."
+        case .timedOut:
+            return "Copilot CLI did not respond in time."
+        case .invalidResponse:
+            return "Copilot CLI returned an unreadable quota response."
+        case .unavailable:
+            return "No plan quota was reported. Check your Copilot CLI sign-in."
+        case .unsupportedCLI:
+            return "This Copilot CLI does not support quota lookup. Update it and reinstall the meter."
+        case .requestFailed:
+            return "Could not read quota. Check copilot login and try again."
+        }
+    }
+}
+
+struct QuotaReply: Decodable {
+    struct Result: Decodable {
+        struct Snapshots: Decodable {
+            let premiumInteractions: PlanQuota?
+
+            enum CodingKeys: String, CodingKey {
+                case premiumInteractions = "premium_interactions"
+            }
+        }
+
+        let quotaSnapshots: Snapshots
+    }
+
+    struct Failure: Decodable {
+        let code: Int
+    }
+
+    let id: Int
+    let result: Result?
+    let error: Failure?
+
+    static func decodeFrame(_ data: Data) throws -> PlanQuota? {
+        guard let separator = data.range(of: Data("\r\n\r\n".utf8)) else {
+            return nil
+        }
+
+        let header = String(decoding: data[..<separator.lowerBound], as: UTF8.self)
+        let lengthPrefix = "content-length:"
+        guard let lengthLine = header.components(separatedBy: "\r\n").first(where: {
+            $0.lowercased().hasPrefix(lengthPrefix)
+        }), let length = Int(lengthLine.dropFirst(lengthPrefix.count).trimmingCharacters(in: .whitespaces)),
+            (1...CopilotCLI.responseLimit).contains(length) else {
+            throw QuotaError.invalidResponse
+        }
+
+        let start = separator.upperBound
+        guard data.endIndex - start >= length else {
+            return nil
+        }
+
+        let reply: Self
+        do {
+            reply = try JSONDecoder().decode(Self.self, from: data[start..<(start + length)])
+        } catch is DecodingError {
+            throw QuotaError.invalidResponse
+        }
+        guard reply.id == 1 else {
+            throw QuotaError.invalidResponse
+        }
+        if let error = reply.error {
+            throw error.code == -32601 ? QuotaError.unsupportedCLI : QuotaError.requestFailed
+        }
+
+        guard let quota = reply.result?.quotaSnapshots.premiumInteractions else {
+            throw QuotaError.unavailable
+        }
+        guard quota.isUnlimitedEntitlement || quota.usedPercentage != nil else {
+            throw QuotaError.invalidResponse
+        }
+
+        return quota
+    }
+}
+
+struct CopilotCLI: Sendable {
+    fileprivate static let responseLimit = 64 * 1024
+
+    func fetchQuota() throws -> PlanQuota {
+        let paths = ProcessInfo.processInfo.environment
+        let defaults = ["/opt/homebrew/bin", "/usr/local/bin", "\(NSHomeDirectory())/.local/bin"]
+        let search = (paths["PATH"] ?? "").split(separator: ":").map(String.init) + defaults
+        let cli = paths["COPILOT_METER_CLI"]
+            ?? search.map { "\($0)/copilot" }.first(where: FileManager.default.isExecutableFile(atPath:))
+        guard let cli, FileManager.default.isExecutableFile(atPath: cli) else {
+            throw QuotaError.missingCLI
+        }
+
+        let input = Pipe()
+        let output = Pipe()
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"account.getQuota","params":{}}"#
+        let frame = "Content-Length: \(request.utf8.count)\r\n\r\n\(request)"
+        try input.fileHandleForWriting.write(contentsOf: Data(frame.utf8))
+        try input.fileHandleForWriting.close()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["--headless", "--no-auto-update", "--stdio"]
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        defer {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+
+        return try readQuota(from: output.fileHandleForReading)
+    }
+
+    private func readQuota(from handle: FileHandle) throws -> PlanQuota {
+        let deadline = DispatchTime.now() + .seconds(15)
+        var descriptor = pollfd(fd: handle.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        var buffer = Data()
+        let chunkSize = 4096
+        var chunk = [UInt8](repeating: 0, count: chunkSize)
+
+        while buffer.count < Self.responseLimit {
+            let now = DispatchTime.now()
+            guard now < deadline else {
+                throw QuotaError.timedOut
+            }
+            let milliseconds = (deadline.uptimeNanoseconds - now.uptimeNanoseconds + 999_999) / 1_000_000
+            let ready = poll(&descriptor, 1, Int32(milliseconds))
+            if ready == 0 {
+                throw QuotaError.timedOut
+            }
+            if ready < 0 && errno == EINTR {
+                continue
+            }
+            guard ready > 0 else {
+                throw QuotaError.requestFailed
+            }
+
+            let count = read(handle.fileDescriptor, &chunk, chunkSize)
+            if count < 0 && errno == EINTR {
+                continue
+            }
+            guard count > 0 else {
+                throw buffer.isEmpty ? QuotaError.requestFailed : QuotaError.invalidResponse
+            }
+            buffer.append(contentsOf: chunk.prefix(count))
+            if let quota = try QuotaReply.decodeFrame(buffer) {
+                return quota
+            }
+        }
+
+        throw QuotaError.invalidResponse
     }
 }

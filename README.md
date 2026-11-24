@@ -1,46 +1,29 @@
 # Copilot Meter
 
-A lightweight macOS menu bar app that displays the current month's GitHub Copilot AI credit usage as one percentage.
+A native macOS menu bar app that shows how much of your GitHub Copilot plan quota you have used, as one percentage.
 
 ## Requirements
 
 - macOS 13 or newer
 - Swift 6
-- GitHub CLI (`gh`)
+- A recent [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/install-copilot-cli) signed in to the account you want to monitor
 
 ## Install
 
 ```bash
-gh auth login -h github.com
-gh auth refresh -h github.com -s user
+copilot login # skip if already signed in
 make install
 ```
 
-`make install` creates `~/Applications/CopilotMeter.app` and starts it after login through a LaunchAgent.
-
-The GitHub OAuth `user` scope is required because the usage endpoint is under GitHub's billing API. The scope is used by `gh`; Copilot Meter does not store or request tokens itself.
+`make install` installs and starts `~/Applications/CopilotMeter.app` and registers it to run at login. It records the Copilot CLI path so the menu bar app can find it without a terminal. Rerun `make install` if the CLI moves.
 
 ## Usage
 
-The menu bar shows a single value such as `24%`. Click it to:
-
-- see used and available AI credits;
-- refresh immediately;
-- set the monthly allowance;
-- open GitHub usage details; or
-- quit.
-
-Copilot Meter refreshes every five minutes. It defaults to 1,500 monthly AI credits (the current total shown for Copilot Pro including its flex allotment). Set the value from the menu if the account uses another plan:
-
-| Plan | Monthly AI credits |
-| --- | ---: |
-| Copilot Pro | 1,500 |
-| Copilot Pro+ | 7,000 |
-| Copilot Max | 20,000 |
+`24%` means 24% used, not 24% remaining. The meter refreshes every five minutes. Its menu shows the last update, offers **Refresh Now**, and explains why if the bar shows `—`.
 
 ## Data source and limitations
 
-Copilot Meter reads `GET /users/{username}/settings/billing/ai_credit/usage` from GitHub's REST API. GitHub returns usage billed directly to the signed-in personal account. Usage from a Copilot license billed through an organization or enterprise is not included in this user-level endpoint.
+The meter starts Copilot CLI briefly to read the active account's `premium_interactions` plan quota through the Copilot SDK's experimental `account.getQuota` RPC. It does not send prompts, request extra OAuth scopes, or store tokens or quota settings. The percentage is for the plan, not Copilot's separate session or weekly rate limits. If the CLI RPC changes, the meter may need an update.
 
 ## Develop
 
@@ -49,4 +32,4 @@ make test
 make build
 ```
 
-The signed ad-hoc app bundle is generated at `dist/CopilotMeter.app`.
+The signed ad-hoc app bundle is generated at `dist/CopilotMeter.app`. To read the same value without opening the menu bar app, run `dist/CopilotMeter.app/Contents/MacOS/CopilotMeter --quota`.
