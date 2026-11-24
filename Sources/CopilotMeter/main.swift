@@ -2,7 +2,7 @@ import AppKit
 
 if CommandLine.arguments.dropFirst() == ["--quota"] {
     do {
-        print(try CopilotCLI().fetchQuota().title)
+        print(try CopilotCLI().fetchQuota().plan.title)
         exit(EXIT_SUCCESS)
     } catch {
         FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))

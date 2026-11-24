@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var refreshTimer: Timer?
-    private var quota: PlanQuota?
+    private var quota: AccountQuota?
     private var updatedAt: Date?
     private var lastError: String?
     private var isRefreshing = false
@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func finishRefresh(_ result: Result<PlanQuota, Error>) {
+    private func finishRefresh(_ result: Result<AccountQuota, Error>) {
         isRefreshing = false
 
         switch result {
@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.quota = quota
             updatedAt = Date()
             lastError = nil
-            statusItem.button?.title = quota.title
+            statusItem.button?.title = quota.plan.title
             statusItem.button?.toolTip = describe(quota)
         case .failure(let error):
             lastError = error.localizedDescription
@@ -95,14 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(menuItem("Refresh Now", action: #selector(refresh)))
-        menu.addItem(menuItem("Open Usage on GitHub", action: #selector(openGitHubUsage)))
+        if let quota {
+            menu.addItem(menuItem("Open Copilot Settings on \(quota.host.name)", action: #selector(openGitHubUsage)))
+        }
         menu.addItem(.separator())
         menu.addItem(menuItem("Quit Copilot Meter", action: #selector(quit)))
     }
 
     @objc
     private func openGitHubUsage() {
-        guard let url = URL(string: "https://github.com/settings/billing/usage") else {
+        guard let url = quota?.host.settingsURL else {
             return
         }
 
@@ -126,8 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func describe(_ quota: PlanQuota) -> String {
-        quota.isUnlimitedEntitlement ? "Copilot plan has no metered quota" : "Copilot plan: \(quota.title) used"
+    private func describe(_ quota: AccountQuota) -> String {
+        let usage = quota.plan.isUnlimitedEntitlement ? "No metered quota" : "\(quota.plan.title) used"
+        return "\(quota.host.name): \(usage)"
     }
 
     private func relativeDate(_ date: Date) -> String {

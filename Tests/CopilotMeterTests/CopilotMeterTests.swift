@@ -4,6 +4,32 @@ import Testing
 
 struct CopilotMeterTests {
     @Test
+    func acceptsEnterpriseHostURLsAndRejectsOtherDestinations() {
+        #expect(GitHubHost("https://ACME-DEV.ghe.com/")?.name == "acme-dev.ghe.com")
+        #expect(GitHubHost("acme-dev.ghe.com")?.settingsURL?.host == "acme-dev.ghe.com")
+        #expect(GitHubHost("http://acme.ghe.com") == nil)
+        #expect(GitHubHost("https://acme.ghe.com.example.com") == nil)
+        #expect(GitHubHost("https://acme.ghe.com/other") == nil)
+    }
+
+    @Test
+    func selectsOnlyAccountsOnTheRequestedHost() throws {
+        let host = try #require(GitHubHost("https://acme.ghe.com/"))
+        let personal = CopilotAccount(authInfo: .init(host: "https://github.com", login: "dev"), selectionId: "personal")
+        let enterprise = CopilotAccount(authInfo: .init(host: "https://ACME.ghe.com", login: "dev"), selectionId: "work")
+        let duplicate = CopilotAccount(authInfo: .init(host: "acme.ghe.com", login: "DEV"), selectionId: "work-duplicate")
+        let different = CopilotAccount(authInfo: .init(host: "acme.ghe.com", login: "another"), selectionId: "other")
+
+        #expect(try CopilotAccount.select(from: [personal, enterprise, duplicate], for: host).selectionId == "work")
+        #expect(throws: QuotaError.notSignedIn(host)) {
+            try CopilotAccount.select(from: [personal], for: host)
+        }
+        #expect(throws: QuotaError.ambiguousAccount(host)) {
+            try CopilotAccount.select(from: [enterprise, different], for: host)
+        }
+    }
+
+    @Test
     func showsUsedPlanQuotaInsteadOfRemainingOrChatQuota() throws {
         let response = frame(#"""
         {"id":1,"result":{"quotaSnapshots":{
@@ -12,8 +38,8 @@ struct CopilotMeterTests {
         }}}
         """#)
 
-        #expect(try QuotaReply.decodeFrame(response)?.title == "80%")
-        #expect(try QuotaReply.decodeFrame(response.dropLast()) == nil)
+        #expect(try quota(response)?.title == "80%")
+        #expect(try quota(response.dropLast()) == nil)
     }
 
     @Test
@@ -24,7 +50,7 @@ struct CopilotMeterTests {
         }}}
         """#)
 
-        let decoded = try QuotaReply.decodeFrame(response)
+        let decoded = try quota(response)
         let quota = try #require(decoded)
         #expect(quota.usedPercentage == nil)
     }
@@ -33,7 +59,7 @@ struct CopilotMeterTests {
     func reportsAnUnsupportedRPCInsteadOfDisplayingZero() {
         let response = frame(#"{"id":1,"error":{"code":-32601,"message":"Method not found"}}"#)
         #expect(throws: QuotaError.unsupportedCLI) {
-            try QuotaReply.decodeFrame(response)
+            try quota(response)
         }
     }
 
@@ -47,11 +73,15 @@ struct CopilotMeterTests {
         """#)
 
         #expect(throws: QuotaError.unavailable) {
-            try QuotaReply.decodeFrame(noPlan)
+            try quota(noPlan)
         }
         #expect(throws: QuotaError.invalidResponse) {
-            try QuotaReply.decodeFrame(invalid)
+            try quota(invalid)
         }
+    }
+
+    private func quota(_ data: Data) throws -> PlanQuota? {
+        try RPCReply<QuotaResult>.decodeFrame(data, id: 1)?.planQuota()
     }
 
     private func frame(_ body: String) -> Data {

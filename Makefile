@@ -39,4 +39,7 @@ install: build
 	plutil -replace Program -string "$$app/Contents/MacOS/CopilotMeter" "$$agent"; \
 	plutil -insert EnvironmentVariables.COPILOT_METER_CLI -string "$$cli" "$$agent"; \
 	plutil -insert EnvironmentVariables.PATH -string "$$path" "$$agent"; \
+	if [ -n "$${COPILOT_METER_HOST:-}" ]; then \
+		plutil -insert EnvironmentVariables.COPILOT_METER_HOST -string "$$COPILOT_METER_HOST" "$$agent"; \
+	fi; \
 	launchctl bootstrap "$$domain" "$$agent"
